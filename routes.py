@@ -2,7 +2,7 @@ import re
 from datetime import date
 from typing import Dict, Optional, Tuple
 
-from flask import Blueprint, current_app, jsonify, render_template, request, session, url_for
+from flask import Blueprint, current_app, jsonify, render_template, request, session, url_for, redirect
 from flask_login import current_user, login_required, login_user, logout_user
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 
@@ -124,6 +124,7 @@ def _get_owned_opportunity(opportunity_id: int) -> Optional[Opportunity]:
     return Opportunity.query.filter_by(id=opportunity_id, admin_id=current_user.id).first()
 
 
+#
 @main_bp.get("/")
 def home():
     return render_template("index.html", requested_view=request.args.get("view", "login"))
@@ -131,13 +132,16 @@ def home():
 
 @main_bp.get("/login")
 def login_page():
-    return render_template("login.html")
+    return redirect(url_for("main.home", view="login"))
+
 
 
 @main_bp.get("/dashboard")
 def dashboard_page():
-    return render_template("dashboard.html")
+    return redirect(url_for("main.home", view="dashboard"))
 
+
+# ================= AUTH ================= #
 
 @main_bp.post("/api/signup")
 def signup():
@@ -157,23 +161,19 @@ def signup():
         errors["password"] = "Password must be at least 8 characters long."
     if password != confirm_password:
         errors["confirm_password"] = "Passwords must match."
+
     if errors:
         return _error("Please fix the highlighted fields.", 400, errors=errors)
 
-    existing_admin = Admin.query.filter_by(email=email).first()
-    if existing_admin:
-        return _error(
-            "An account with this email already exists.",
-            409,
-            errors={"email": "Email is already registered."},
-        )
+    if Admin.query.filter_by(email=email).first():
+        return _error("Email already registered.", 409)
 
     admin = Admin(full_name=full_name, email=email)
     admin.set_password(password)
     db.session.add(admin)
     db.session.commit()
 
-    return _success("Account created successfully. Please log in.", 201)
+    return _success("Account created successfully.", 201)
 
 
 @main_bp.post("/api/login")
@@ -182,18 +182,12 @@ def login():
 
     email = _normalize_email(str(data.get("email", "")))
     password = str(data.get("password", ""))
-    remember_me = bool(data.get("remember_me"))
-
-    if not email or not password:
-        return _error("Invalid email or password", 401)
 
     admin = Admin.query.filter_by(email=email).first()
     if not admin or not admin.check_password(password):
         return _error("Invalid email or password", 401)
 
-    login_user(admin, remember=remember_me)
-    session.permanent = remember_me
-
+    login_user(admin)
     return _success("Login successful.", user=admin.to_public_dict())
 
 
@@ -202,114 +196,16 @@ def login():
 def logout():
     logout_user()
     session.clear()
-    return _success("Signed out successfully.")
+    return _success("Logged out successfully.")
 
 
-@main_bp.post("/api/forgot-password")
-def forgot_password():
-    data = _json_data()
-    email = _normalize_email(str(data.get("email", "")))
-
-    if not email or not _validate_email(email):
-        return _error("Please enter a valid email address.", 400)
-
-    admin = Admin.query.filter_by(email=email).first()
-    if admin:
-        token = _serializer().dumps(
-            admin.email,
-            salt=current_app.config["RESET_PASSWORD_SALT"],
-        )
-        reset_link = url_for("main.reset_password", token=token, _external=True)
-        current_app.logger.warning("Password reset link for %s: %s", admin.email, reset_link)
-
-    return _success(
-        "If an account exists for this email, a password reset link has been generated."
-    )
-
-
-@main_bp.route("/reset-password/<token>", methods=["GET", "POST"])
-def reset_password(token: str):
-    try:
-        email = _load_reset_email(token)
-    except SignatureExpired:
-        return render_template(
-            "reset_password.html",
-            token=token,
-            valid=False,
-            success=False,
-            message="This reset link expired after 1 hour. Please request a new one.",
-        )
-    except BadSignature:
-        return render_template(
-            "reset_password.html",
-            token=token,
-            valid=False,
-            success=False,
-            message="This password reset link is invalid.",
-        )
-
-    if request.method == "POST":
-        password = str(request.form.get("password", ""))
-        confirm_password = str(request.form.get("confirm_password", ""))
-
-        if len(password) < 8:
-            return render_template(
-                "reset_password.html",
-                token=token,
-                valid=True,
-                success=False,
-                message="Password must be at least 8 characters long.",
-            )
-        if password != confirm_password:
-            return render_template(
-                "reset_password.html",
-                token=token,
-                valid=True,
-                success=False,
-                message="Passwords do not match.",
-            )
-
-        admin = Admin.query.filter_by(email=email).first()
-        if admin:
-            admin.set_password(password)
-            db.session.commit()
-
-        return render_template(
-            "reset_password.html",
-            token=token,
-            valid=True,
-            success=True,
-            message="Password updated successfully. You can return to the login page.",
-        )
-
-    return render_template(
-        "reset_password.html",
-        token=token,
-        valid=True,
-        success=False,
-        message=f"Resetting password for {email}",
-    )
-
-
-@main_bp.get("/api/session")
-def session_status():
-    if current_user.is_authenticated:
-        return _success("Session active.", authenticated=True, user=current_user.to_public_dict())
-    return _success("No active session.", authenticated=False, user=None)
 
 
 @main_bp.get("/api/opportunities")
 @login_required
 def list_opportunities():
-    opportunities = (
-        Opportunity.query.filter_by(admin_id=current_user.id)
-        .order_by(Opportunity.created_at.desc())
-        .all()
-    )
-    return _success(
-        "Opportunities loaded successfully.",
-        data=[opportunity.to_dict() for opportunity in opportunities],
-    )
+    ops = Opportunity.query.filter_by(admin_id=current_user.id).all()
+    return _success("Loaded", data=[o.to_dict() for o in ops])
 
 
 @main_bp.post("/api/opportunities")
@@ -317,53 +213,22 @@ def list_opportunities():
 def create_opportunity():
     cleaned, errors = _validate_opportunity_payload(_json_data())
     if errors:
-        return _error("Please fix the opportunity details.", 400, errors=errors)
+        return _error("Validation failed", 400, errors=errors)
 
-    opportunity = Opportunity(admin_id=current_user.id, **cleaned)
-    db.session.add(opportunity)
+    op = Opportunity(admin_id=current_user.id, **cleaned)
+    db.session.add(op)
     db.session.commit()
 
-    return _success(
-        "Opportunity created successfully.",
-        201,
-        data=opportunity.to_dict(),
-    )
+    return _success("Created", data=op.to_dict())
 
 
-@main_bp.get("/api/opportunities/<int:opportunity_id>")
+@main_bp.delete("/api/opportunities/<int:id>")
 @login_required
-def get_opportunity(opportunity_id: int):
-    opportunity = _get_owned_opportunity(opportunity_id)
-    if not opportunity:
-        return _error("Opportunity not found.", 404)
-    return _success("Opportunity loaded successfully.", data=opportunity.to_dict())
+def delete_opportunity(id):
+    op = _get_owned_opportunity(id)
+    if not op:
+        return _error("Not found", 404)
 
-
-@main_bp.route("/api/opportunities/<int:opportunity_id>", methods=["PUT", "POST"])
-@login_required
-def update_opportunity(opportunity_id: int):
-    opportunity = _get_owned_opportunity(opportunity_id)
-    if not opportunity:
-        return _error("Opportunity not found.", 404)
-
-    cleaned, errors = _validate_opportunity_payload(_json_data())
-    if errors:
-        return _error("Please fix the opportunity details.", 400, errors=errors)
-
-    for field, value in cleaned.items():
-        setattr(opportunity, field, value)
-
+    db.session.delete(op)
     db.session.commit()
-    return _success("Opportunity updated successfully.", data=opportunity.to_dict())
-
-
-@main_bp.delete("/api/opportunities/<int:opportunity_id>")
-@login_required
-def delete_opportunity(opportunity_id: int):
-    opportunity = _get_owned_opportunity(opportunity_id)
-    if not opportunity:
-        return _error("Opportunity not found.", 404)
-
-    db.session.delete(opportunity)
-    db.session.commit()
-    return _success("Opportunity deleted successfully.")
+    return _success("Deleted")
