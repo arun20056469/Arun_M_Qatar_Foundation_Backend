@@ -201,3 +201,4 @@ This project is part of the **CertifyMe Full Stack Intern Assessment**. The repo
 - Delete permanently from the database
 - Remove from UI immediately **without page refresh**
 - Only the creator admin can delete their own opportunity
+"# Arun_M_Qatar_Foundation_Backend" 
